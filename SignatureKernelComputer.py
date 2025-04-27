@@ -11,6 +11,7 @@ from static_kernels import RBFKernel, LinearKernel
 from joblib import Parallel, delayed
 import numpy as np
 import torch
+from utils import shift  # import the newly added shift helper
 
 class SignatureKernelComputer:
     """
@@ -129,9 +130,9 @@ class SignatureKernelComputer:
         return Kernel_training_dual,Kernel_testing_dual
 
 
-    def truncated_sig_kernel(self,X, Y, num_levels, sigma=1., order=-1):
-    """
-    Computes the (truncated) signature kernel matrix of a given array of sequences. 
+    def truncated_sig_kernel(self, X, Y, num_levels, sigma=1., order=-1):
+        """
+        Computes the (truncated) signature kernel matrix of a given array of sequences. 
     
     Inputs:
     :X: a numpy array of shape (num_seq_X, len_seq_X, num_feat) of num_seq_X sequences of equal length, len_seq_X, with num_feat coordinates
@@ -143,28 +144,28 @@ class SignatureKernelComputer:
     Output:
     :K: a numpy array of shape (num_seq_X, num_seq_Y)
     """
-    order = num_levels if order < 1 else order
-    sigma = sigma * np.ones((num_levels + 1,), dtype=X.dtype)
-    
-    num_seq_X, len_seq_X, num_feat = X.shape
-    num_seq_Y, len_seq_Y, _ = Y.shape
-    
-    M = np.reshape(X.reshape((-1, num_feat)) @ Y.reshape((-1, num_feat)).T, (num_seq_X, len_seq_X, num_seq_Y, len_seq_Y))
-    K = sigma[0] * np.ones((num_seq_X, num_seq_Y), dtype=X.dtype) + sigma[1] * np.sum(M, axis=(1, 3))
-    R = M[None, None, ...]
-    
-    for m in range(1, num_levels):
-        d = min(m+1, order)
-        R_next = np.empty((d, d, num_seq_X, len_seq_X, num_seq_Y, len_seq_Y), dtype=X.dtype)
-        R_next[0, 0] = M * shift(np.cumsum(np.cumsum(np.sum(R, axis=(0, 1)), axis=1), axis=3), shift=(0, 1, 0, 1))
-        for j in range(1, d):
-            R_next[0, j] = 1./(j+1) * M * shift(np.cumsum(np.sum(R[:, j-1], axis=0), axis=1), shift=(0, 1, 0, 0))
-            R_next[j, 0] = 1./(j+1) * M * shift(np.cumsum(np.sum(R[j-1, :], axis=0), axis=3), shift=(0, 0, 0, 1))
-            for i in range(1, d):
-                R_next[i, j] = 1./((j+1)*(i+1)) * M * R[i-1, j-1]
-        R = R_next
-        K += sigma[m+1] * np.sum(R, axis=(0, 1, 3, 5))
-    return K
-    
+        order = num_levels if order < 1 else order
+        sigma = sigma * np.ones((num_levels + 1,), dtype=X.dtype)
+        
+        num_seq_X, len_seq_X, num_feat = X.shape
+        num_seq_Y, len_seq_Y, _ = Y.shape
+        
+        M = np.reshape(X.reshape((-1, num_feat)) @ Y.reshape((-1, num_feat)).T, (num_seq_X, len_seq_X, num_seq_Y, len_seq_Y))
+        K = sigma[0] * np.ones((num_seq_X, num_seq_Y), dtype=X.dtype) + sigma[1] * np.sum(M, axis=(1, 3))
+        R = M[None, None, ...]
+        
+        for m in range(1, num_levels):
+            d = min(m+1, order)
+            R_next = np.empty((d, d, num_seq_X, len_seq_X, num_seq_Y, len_seq_Y), dtype=X.dtype)
+            R_next[0, 0] = M * shift(np.cumsum(np.cumsum(np.sum(R, axis=(0, 1)), axis=1), axis=3), shift=(0, 1, 0, 1))
+            for j in range(1, d):
+                R_next[0, j] = 1./(j+1) * M * shift(np.cumsum(np.sum(R[:, j-1], axis=0), axis=1), shift=(0, 1, 0, 0))
+                R_next[j, 0] = 1./(j+1) * M * shift(np.cumsum(np.sum(R[j-1, :], axis=0), axis=3), shift=(0, 0, 0, 1))
+                for i in range(1, d):
+                    R_next[i, j] = 1./((j+1)*(i+1)) * M * R[i-1, j-1]
+            R = R_next
+            K += sigma[m+1] * np.sum(R, axis=(0, 1, 3, 5))
+        return K
 
-    
+
+

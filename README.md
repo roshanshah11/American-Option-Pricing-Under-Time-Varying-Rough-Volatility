@@ -9,6 +9,22 @@ A step-by-step guidance with notebooks is provided for:
 
 Additionally, for American options in the rough Bergomi we provide two files Testing_linear_signature_stopping.py and Testing_deep_signature_stopping.py, where one can play around with different (hyper) parameters and model choices. Notice that the implementation does not depend on the underlying model, and these examples can easily be modified for different models by simply changing the simulation of the training and testing data.
 
+## macOS (Homebrew) Setup
+If you're on macOS using Homebrew, you can install a Python version compatible with TensorFlow (Python ≤ 3.10) and create your venv as follows:
+```bash
+# Install Python 3.10 via Homebrew
+brew install python@3.10
+# Ensure the new Python is first in your PATH
+brew unlink python && brew link --force python@3.10
+# Create and activate a venv with Python 3.10
+python3.10 -m venv .venv
+source .venv/bin/activate
+# Upgrade pip
+python3.10 -m pip install --upgrade pip
+# Install TensorFlow macOS builds
+pip install tensorflow-macos==2.11.0 tensorflow-metal==0.7.0
+```
+
 ## Remarks about the code:
 - The module Signature_computer.py relies in the package iisignature (https://pypi.org/project/iisignature/), and allows to compute log and standard signatures for various variation of underlying paths.
 - The LinearDualSolver in Linear_signature_optimal_stopping.py has the option of choosing Gurobi optimization to solve the linear programs, which requires a free license (an explanation how to install it can be found here https://www.gurobi.com/academia/academic-program-and-licenses/). It is recommended to use it for high-dimensional problems, but alternatively one can set LP_solver ="CVXPY", to use the free cvxpy solvers.

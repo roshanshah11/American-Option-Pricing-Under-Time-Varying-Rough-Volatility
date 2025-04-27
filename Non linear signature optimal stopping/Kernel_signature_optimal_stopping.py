@@ -14,6 +14,8 @@ from sklearn.linear_model import Ridge
 import time as time
 import gurobipy as gu
 from gurobipy import GRB
+import cvxpy as cp
+
 class KernelLongstaffSchwartzPricer:
     """
     Computes the lower bound of optimal stopping problem using kernel ridge regression with signature kernels.
@@ -139,6 +141,7 @@ class KernelDualPricer:
             res = solver.solve_cvxpy()
         elif self.LP_solver == "Adam":
             solver = AdamSolver(F=Payoff_training, tt=np.linspace(0, self.T, self.N1 + 1), N1=self.N1, N=N, D=self.L, M=M, Y=MG_training[:,subindex2,:], subindex=subindex2)
+            res = solver.solve()  # Call the solve method
         else:
             raise ValueError(f"Invalid LP solver: {self.LP_solver}")
         
@@ -222,5 +225,123 @@ class LPSolver:
         end_time = time.time()
         print(f'{end_time - start_time:.2f} seconds needed to solve the linear program using Gurobi')
         return xx[self.M:self.M + self.L]
+
+class AdamSolver:
+    def __init__(self, F, tt, N1, N, D, M, Y, subindex):
+        """
+        Initialize the AdamSolver with common parameters.
+        
+        Parameters:
+        F : array, shape (M, N+1)
+            Samples of Payoff
+        tt : array
+            Discretized interval [0,T]
+        N1 : int
+            Number of exercise dates for optimal stopping
+        N : int
+            Number of discretization times (typically N>>N1)
+        D : int
+            Size of signature
+        M : int
+            Sample size
+        Y : array, shape (M, N1+1, D)
+            Samples of martingale bases at exercise dates
+        subindex : array
+            Indices of exercise dates nested in discretization
+        """
+        self.F = F
+        self.tt = tt
+        self.N1 = N1
+        self.N = N
+        self.D = D
+        self.M = M
+        self.Y = Y
+        self.subindex = subindex
+        self.L = int(len(Y[0, 0, :]))  # Number of basis functions martingales
+        
+        # Precompute common matrices
+        self.c = np.zeros(M + self.L)
+        self.c[0:M] = 1/M
+        self.B = np.zeros(M * (N1 + 1))
+        self.A = np.zeros(shape=(M * (N1 + 1), self.L + M))
+        for l in range(M):
+            self.B[l*(N1+1):(l+1)*(N1+1)] = F[l, subindex]
+            self.A[l*(N1+1):(l+1)*(N1+1), l] = 1
+            self.A[l*(N1+1):(l+1)*(N1+1), M:M+self.L] = Y[l, :, :]
+    
+    def solve(self, max_iter=1000, lr=0.01, beta1=0.9, beta2=0.999, epsilon=1e-8):
+        """
+        Solve the LP using Adam optimizer.
+        
+        Parameters:
+        max_iter : int
+            Maximum number of iterations
+        lr : float
+            Learning rate
+        beta1, beta2 : float
+            Adam optimizer parameters
+        epsilon : float
+            Small constant for numerical stability
+            
+        Returns:
+        numpy.ndarray
+            Optimal solution for the LP
+        """
+        start_time = time.time()
+        
+        # Convert to PyTorch tensors for easier gradient computation
+        A_tensor = torch.tensor(self.A, dtype=torch.float32)
+        B_tensor = torch.tensor(self.B, dtype=torch.float32)
+        c_tensor = torch.tensor(self.c, dtype=torch.float32)
+        
+        # Initialize variable with random values
+        x = torch.randn(self.M + self.L, requires_grad=True)
+        
+        # Initialize Adam optimizer parameters
+        m = torch.zeros_like(x)
+        v = torch.zeros_like(x)
+        
+        for t in range(1, max_iter + 1):
+            # Reset gradients
+            if x.grad is not None:
+                x.grad.zero_()
+            
+            # Compute constraint violation
+            Ax = torch.matmul(A_tensor, x)
+            constraint_violation = torch.relu(B_tensor - Ax)  # max(0, B - Ax)
+            penalty = torch.sum(constraint_violation)
+            
+            # Objective function + penalty
+            obj = torch.dot(c_tensor, x) + 10.0 * penalty
+            
+            # Compute gradients
+            obj.backward()
+            
+            # Update parameters using Adam
+            with torch.no_grad():
+                # Update biased first moment estimate
+                m = beta1 * m + (1 - beta1) * x.grad
+                # Update biased second raw moment estimate
+                v = beta2 * v + (1 - beta2) * x.grad * x.grad
+                
+                # Bias correction
+                m_hat = m / (1 - beta1 ** t)
+                v_hat = v / (1 - beta2 ** t)
+                
+                # Update parameters
+                x -= lr * m_hat / (torch.sqrt(v_hat) + epsilon)
+            
+            # Print progress every 100 iterations
+            if t % 100 == 0:
+                with torch.no_grad():
+                    current_obj = torch.dot(c_tensor, x) 
+                    current_penalty = torch.sum(torch.relu(B_tensor - torch.matmul(A_tensor, x)))
+                    print(f"Iteration {t}: Objective = {current_obj.item():.6f}, Constraint Violation = {current_penalty.item():.6f}")
+        
+        end_time = time.time()
+        print(f'{end_time - start_time:.2f} seconds needed to solve the linear program using Adam optimizer')
+        
+        # Return numpy array
+        return x.detach().numpy()[self.M:self.M + self.L]
 
 

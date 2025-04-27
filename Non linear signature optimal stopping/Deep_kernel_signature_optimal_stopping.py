@@ -8,8 +8,8 @@ Created on Mon Sep  2 15:13:35 2024
 
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras import layers, models, optimizers, regularizers
+from keras.src.callbacks import EarlyStopping
+from keras.src import layers, models, optimizers, regularizers
 from functools import reduce
 
 class DeepKernelLongstaffSchwartzPricer:
@@ -149,9 +149,9 @@ class DeepKernelLongstaffSchwartzPricer:
 
                 
                 
-                continuatuion_value_estimate = regr[k-1].predict(kernel_exercise_training[:,j-1,:])
+                continuatuion_value_estimate = regr[k-1].predict(kernel_exercise_training[:,k-1,:])
                 
-                for m in range(M_new):
+                for m in range(M):
                     if continuatuion_value_estimate[m] <= Payoff_exercise_training[m, k-1]:
                         value_training[m] = Payoff_exercise_training[m, k-1]
         

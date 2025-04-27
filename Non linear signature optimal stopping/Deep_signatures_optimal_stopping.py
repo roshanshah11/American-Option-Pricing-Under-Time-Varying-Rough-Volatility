@@ -10,8 +10,9 @@ deep neural networks on signatures, and using the signature kernel.
 """
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras import layers, models, optimizers, regularizers
+from keras.src.callbacks import EarlyStopping
+from keras.src import layers, models, optimizers
+import keras.src.regularizers as kr  # Updated import for regularizers
 from functools import reduce
 
 class DeepLongstaffSchwartzPricer:
@@ -434,8 +435,13 @@ class LongstaffSchwartzModel:
         for _ in range(self.layers_number):
             if self.layer_normalization:
                 model.add(layers.LayerNormalization(epsilon=1e-6))
-            model.add(layers.Dense(self.nodes, activation=activation,
-                                   kernel_regularizer=regularizers.l2(self.regularizer)))
+            # Updated regularizer usage
+            if self.regularizer > 0:
+                model.add(layers.Dense(self.nodes, activation=activation,
+                                      kernel_regularizer=kr.L2(self.regularizer)))
+            else:
+                model.add(layers.Dense(self.nodes, activation=activation))
+                
             if self.layer_normalization:
                 model.add(layers.LayerNormalization(epsilon=1e-6))
             if self.dropout:
@@ -527,8 +533,12 @@ class DualNetworkModel:
         if self.batch_normalization:
             layers_list.append(layers.BatchNormalization())
 
-        layers_list.append(tf.keras.layers.Dense(self.q, activation=activation,
-                                                 kernel_regularizer=regularizers.l2(self.regularizer)))
+        # Updated regularizer usage
+        if self.regularizer > 0:
+            layers_list.append(tf.keras.layers.Dense(self.q, activation=activation,
+                                                   kernel_regularizer=kr.L2(self.regularizer)))
+        else:
+            layers_list.append(tf.keras.layers.Dense(self.q, activation=activation))
 
         num_attention_heads = 2
         for _ in range(self.I - 1):
@@ -538,8 +548,13 @@ class DualNetworkModel:
                 layers_list.append(layers.MultiHeadAttention(num_heads=num_attention_heads,
                                                              key_dim=max(1, self.q // num_attention_heads),
                                                              dropout=0.1))
-            layers_list.append(tf.keras.layers.Dense(self.q, activation=activation,
-                                                     kernel_regularizer=regularizers.l2(self.regularizer)))
+            # Updated regularizer usage
+            if self.regularizer > 0:
+                layers_list.append(tf.keras.layers.Dense(self.q, activation=activation,
+                                                       kernel_regularizer=kr.L2(self.regularizer)))
+            else:
+                layers_list.append(tf.keras.layers.Dense(self.q, activation=activation))
+                
             if self.layer_normalization:
                 layers_list.append(layers.LayerNormalization(epsilon=1e-6))
             if self.dropout:

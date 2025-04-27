@@ -6,9 +6,20 @@ Created on Fri Mar 15 15:09:30 2024
 @author: lucapelizzari
 """
 
+import sys
 import numpy as np
 from scipy.stats import norm
 from scipy.optimize import brentq
+
+# new shift utility for SignatureKernelComputer
+
+def shift(x, shifts):
+    """
+    Roll array x along each axis by shifts tuple using numpy.roll.
+    """
+    for ax, sh in enumerate(shifts):
+        x = np.roll(x, sh, axis=ax)
+    return x
 
 def g(x, a):
     """

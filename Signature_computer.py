@@ -11,7 +11,10 @@ for various choices of signature lifts, and polynomial features.
 import math
 import numpy as np
 import scipy.special as sc
-import iisignature as ii
+try:
+    import iisignature as ii
+except ImportError:
+    raise ImportError("The 'iisignature' library is required but not installed. Please install it using 'pip install iisignature'.")
 
 class SignatureComputer:
     """
@@ -40,7 +43,7 @@ class SignatureComputer:
         A = monoton compononent for augmentation (e.g. time, QV), array of Mx(N+1)
         Payoff = payoff process, array of Mx(N+1)
         dW = Brownian noise, optional
-        I = \int vdW 
+        I = \int vdW
         MM = B
 
         Output is linear or log signature of augmented path, array of Mx(N+1)x(K+1), 
@@ -194,8 +197,9 @@ class SignatureComputer:
             States[:,:,1] = Payoff
             return np.concatenate((Sig, States), axis=-1)
         elif self.signature_lift == "polynomial-vol":
+            # Use specialized 2D log-signature for degree <=3 to avoid ii.prepare overflow
             XX = np.stack([A, vol], axis=-1)
-            Sig = self._full_log_signature(XX)
+            Sig = self._full_log_signature_dim_two_level_three(XX, self.K)
             Poly = self._compute_polynomials(X)
             return np.concatenate((Sig, Poly), axis=-1)
         elif self.signature_lift == "logprice-vol-Brownian-sig":
@@ -300,19 +304,18 @@ class SignatureComputer:
         Returns:
             np.ndarray: The computed log signatures.
         """
+        # Batch computation to avoid buffer overflow on large batch sizes
         m, n, d = X.shape
-        log_sig = np.zeros((m, n, ii.logsiglength(d, self.K)))
+        L = ii.logsiglength(d, self.K)
+        log_sig = np.zeros((m, n, L))
         bch = ii.prepare(d, self.K, 'C')  # precalculate the BCH formula
-        for i in range(1, n):
-            log_sig[:, i] = ii.logsig(X[:,:i+1], bch, 'C')
-        #if (d == 2) and (self.K <= 3):
-            #return self._full_log_signature_dim_two_level_three(X, self.K)
-        #else:
-            #log_sig = np.zeros((m, n, ii.logsiglength(d, self.K)))
-            #bch = ii.prepare(d, self.K, 'C')  # precalculate the BCH formula
-            #for i in range(1, n):
-                #log_sig[:, i] = ii.logsig(X[:,:i+1], bch, 'C')
-        
+        batch_size = 2048  # adjust batch size as needed
+        for start in range(0, m, batch_size):
+            end = min(start + batch_size, m)
+            X_batch = X[start:end]  # shape (batch, n, d)
+            for i in range(1, n):
+                # compute logsig for each time step i for batch
+                log_sig[start:end, i] = ii.logsig(X_batch[:, :i+1], bch, 'C')
         return log_sig
     def _full_log_signature_dim_two_level_three(self, X, deg):
         """
