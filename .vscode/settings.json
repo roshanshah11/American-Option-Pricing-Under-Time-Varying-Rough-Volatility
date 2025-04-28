@@ -1,0 +1,11 @@
+{
+    "python.analysis.extraPaths": [
+        "./Linear signature optimal stopping",
+        "./Non linear signature optimal stopping",
+        "/Users/roshanshah1/.venv/lib/python3.10/site-packages"
+    ],
+    "python.pythonPath": "/Users/roshanshah1/.venv/bin/python",
+    "python.analysis.diagnosticSeverityOverrides": {
+        "reportMissingImports": "none"
+    }
+}
