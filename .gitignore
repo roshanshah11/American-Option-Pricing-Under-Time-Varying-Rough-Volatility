@@ -1,3 +1,6 @@
+# Project specific ignores
+XGboost_Roshan/src/data/
+XGboost_Roshan/src/models/
 # Python virtual environments
 .venv/
 venv/
@@ -28,4 +31,5 @@ htmlcov/
 .Spotlight-V100
 .Trashes
 ehthumbs.db
-Thumbs.db
+Thumbs.dbXGboost_Roshan/src/data/
+XGboost_Roshan/src/models/

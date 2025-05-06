@@ -1,180 +1,225 @@
 #!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from pathlib import Path
-import xgboost as xgb
-from sklearn.metrics import mean_squared_error, mean_absolute_error
-import random
+# This script computes the rolling Hurst exponent of a time series
+# and trains/evaluates an XGBoost model to forecast its future values.
 
-def compute_rolling_hurst(returns, power):
+import numpy as np                # numerical operations (arrays, math)
+import pandas as pd               # data manipulation (DataFrame)
+import matplotlib.pyplot as plt   # plotting library for visualization
+from pathlib import Path          # convenient filesystem path handling
+from sklearn.metrics import mean_squared_error, mean_absolute_error # error metrics for model evaluation
+from concurrent.futures import ProcessPoolExecutor
+from typing import Tuple, List, Optional
+import logging                    # logging status and debug messages
+import joblib                     # saving/loading Python objects (models)
+import seaborn as sns
+from datetime import datetime, timedelta
+import json
+from xgboost import XGBRegressor  # XGBoost regression model
+
+# Forecast horizon depth (how many days ahead to predict)
+HORIZON = 14
+
+# Configure logger to display INFO messages with timestamp
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Paths for raw CSV and cached pickle files
+DATA_PATH   = Path(__file__).parent / 'data' / 'dataset3.csv'
+DATA_PICKLE = Path(__file__).parent / 'data' / 'dataset3.pkl'
+
+# Directory to store trained models
+MODELS_DIR = Path(__file__).parent / 'models'
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+def compute_rolling_hurst(returns: np.ndarray, power: int) -> np.ndarray:
+    """
+    Calculate the Hurst exponent using R/S analysis over
+    a rolling window of size 2^power.
+    """
+    # here is a source i used: https://en.wikipedia.org/wiki/Hurst_exponent
+    # Ensure returns are in numpy array form
+    if not isinstance(returns, np.ndarray):
+        returns = np.array(returns)
+    # Validate 'power' parameter
+    if not isinstance(power, int) or power < 1:
+        raise ValueError("power must be a positive integer")
+    # Window length = 2^power
     n = 2**power
-    hursts = []
-    for t in range(n, len(returns)+1):
-        data = returns[t-n:t]
-        X = np.arange(2, power+1)
-        Y = []
-        for p in X:
-            m = 2**p
-            s = 2**(power-p)
-            rs_vals = []
-            for i in range(s):
-                subs = data[i*m:(i+1)*m]
-                dev = np.cumsum(subs - subs.mean())
-                R = dev.max() - dev.min()
-                S = subs.std()
-                rs_vals.append(R/S if S!=0 else 0)
-            Y.append(np.log2(np.mean(rs_vals)))
-        coeff = np.polyfit(X, Y, 1)
-        hursts.append(coeff[0])
+    if len(returns) < n:
+        raise ValueError(f"Need at least {n} data points for power={power}")
+    hursts = []                          # list to collect Hurst exponents
+    exponents = np.arange(2, power+1)    # scales for R/S calculation
+    # Slide the window through the data
+    for t in range(n, len(returns) + 1):
+        window = returns[t-n:t]          # current data chunk
+        rs_log = []                      # log2 of rescaled range values
+        for exp in exponents:
+            # split window into segments and compute R/S per segment
+            m = 2**exp
+            s = n // m
+            segments = window.reshape(s, m)
+            dev = np.cumsum(
+                segments - segments.mean(axis=1, keepdims=True),
+                axis=1
+            )
+            R = dev.max(axis=1) - dev.min(axis=1)
+            S = segments.std(axis=1)
+            rs = np.where(S != 0, R/S, 0)
+            rs_log.append(np.log2(rs.mean()))
+        # linear fit: slope ≈ Hurst exponent
+        hursts.append(np.polyfit(exponents, rs_log, 1)[0])
     return np.array(hursts)
 
+def load_data() -> pd.DataFrame:
+    """
+    Load the price dataset from CSV or cache, sort by date,
+    and return a pandas DataFrame.
+    """
+    # here is a source i used: https://pandas.pydata.org/docs/reference/api/pandas.read_csv.html
+    if DATA_PICKLE.exists():
+        df = pd.read_pickle(DATA_PICKLE)
+        logger.info(f"Loaded data from cache: {DATA_PICKLE}")
+    else:
+        df = pd.read_csv(
+            DATA_PATH,
+            parse_dates=['date'],
+            low_memory=False
+        )
+        df.sort_values('date', inplace=True)
+        df.to_pickle(DATA_PICKLE)
+        logger.info(f"Saved data to cache: {DATA_PICKLE}")
+    return df
 
-def make_lag_features(series, k):
-    X, y, dates = [], [], []
-    for i in range(k, len(series)):
-        # use positional indexing to avoid future deprecation
-        window = series.iloc[i-k:i].values
-        X.append(window)
-        y.append(series.iloc[i])
-        dates.append(series.index[i])
-    return np.array(X), np.array(y), dates
+def make_lagged_features(series: pd.Series, k: int):
+    """Generate lagged features matrix X and target vector y from a series."""
+    vals = series.values
+    X, y = [], []
+    for i in range(k, len(vals)):
+        X.append(vals[i-k:i])
+        y.append(vals[i])
+    return np.array(X), np.array(y)
 
-# ─── CONFIGURATION ─────────────────────────────────────────────────────────────
-# Remove argparse config and replace with interactive menu
+def train_xgb_only(hurst_series: pd.Series, train_frac: float, k: int, xgb_params: dict):
+    """Train a pure XGBoost model on lagged Hurst series."""
+    # here is a source i used: https://xgboost.readthedocs.io/en/stable/python/python_api.html#xgboost.XGBRegressor
+    split = int(len(hurst_series) * train_frac)
+    train = hurst_series.iloc[:split]
+    X_tr, y_tr = make_lagged_features(train, k)
+    xgb_only = XGBRegressor(**xgb_params)
+    xgb_only.fit(X_tr, y_tr)
+    joblib.dump(xgb_only, MODELS_DIR / 'xgb_only.pkl')
+    logger.info("Pure XGBoost model saved to %s", MODELS_DIR)
+    return xgb_only
+
+def evaluate_xgb_only(hurst_series: pd.Series, xgb_only, k: int, test_frac: float):
+    """Evaluate pure XGBoost model on test split and plot results."""
+    # here is a source i used: https://scikit-learn.org/stable/modules/model_evaluation.html
+    split = int(len(hurst_series) * (1 - test_frac))
+    test = hurst_series.iloc[split:]
+    X_te, y_te = make_lagged_features(test, k)
+    y_pred = xgb_only.predict(X_te)
+    mse = mean_squared_error(y_te, y_pred)
+    mae = mean_absolute_error(y_te, y_pred)
+    logger.info("XGBoost-only results – MSE: %.4f, MAE: %.4f", mse, mae)
+    # Plot actual vs prediction
+    plt.figure(figsize=(12,6))
+    dates_te = test.index[k:]
+    plt.plot(dates_te, y_te, 'k-', label='Actual Hurst')
+    plt.plot(dates_te, y_pred, 'g--', label='XGB-only Forecast')
+    plt.title('XGBoost-only: Actual vs Forecast Hurst Exponent')
+    plt.xlabel('Date'); plt.ylabel('Hurst Exponent')
+    plt.legend(); plt.grid(True); plt.xticks(rotation=45); plt.tight_layout(); plt.show()
+    return mse, mae
+
+def forecast_xgb_only(hurst_series: pd.Series, xgb_only, periods: int, k: int):
+    """Generate future forecasts using pure XGBoost model recursively."""
+    # here is a source i used: https://pandas.pydata.org/docs/reference/api/pandas.date_range.html
+    hist = list(hurst_series.values)
+    preds = []
+    for _ in range(periods):
+        if len(hist) < k:
+            p = 0
+        else:
+            p = xgb_only.predict(np.array(hist[-k:]).reshape(1, -1))[0]
+        preds.append(p)
+        hist.append(p)
+    dates = pd.date_range(hurst_series.index[-1] + pd.Timedelta(days=1), periods=periods, freq='B')
+    return pd.DataFrame({'ds': dates, 'yhat': np.array(preds)})
+
 def interactive_menu():
+    # here is a source i used: https://docs.python.org/3/library/functions.html#input
     print("Select action:")
-    print("0: Train model")
-    print("1: Evaluate model")
-    print("2: Forecast Hurst values")
-    choice = input("Enter choice (0,1,2): ")
+    print("0: Train XGBoost model (interactive)")
+    print("1: Evaluate XGBoost model (interactive)")
+    print("2: Forecast XGBoost model (interactive)")
+    print("4: Quick train XGBoost with defaults")
+    print("5: Quick evaluate XGBoost with defaults")
+    print("6: Quick forecast XGBoost with defaults")
+    choice = input("Enter choice (0,1,2,4,5,6): ")
     return choice
 
-# gather user inputs
-mode = interactive_menu()
-train = (mode == '0')
-evaluate = (mode == '1')
-forecast = 0
-if mode == '2':
-    forecast = int(input("Enter number of days to forecast: ") or 14)
-
-# common parameters
-power = int(input("Enter power for rolling Hurst (default 6): ") or 6)
-k = 10
-# ticker for training
-ticker = ''
-if mode != '0':
-    # ticker for evaluate/forecast
-    ticker = input("Enter ticker symbol (default AAPL): ") or 'AAPL'
-num_tickers = 0
-if mode == '0':
-# num_tickers only for training
-    num_tickers = int(input("Enter number of tickers for training (default 150): ") or 150)
-# train/test split fraction
-train_frac = float(input("Enter train split fraction (default 0.9): ") or 0.9)
-# ────────────────────────────────────────────────────────────────────────────────
-
 def main():
-    print(f"Config -> ticker={ticker}, power={power}, k={k}, num_tickers={num_tickers}, train={train}, evaluate={evaluate}, forecast={forecast}")
+    """
+    Main entry point: show menu, get user choice, compute Hurst series,
+    and train/evaluate/forecast the XGBoost model as requested.
+    """
+    # here is a source i used: https://docs.python.org/3/library/logging.html
+    logger.info("Starting main execution...")
+    mode = interactive_menu().strip()
+    if mode not in ['0','1','2','4','5','6']:
+        logger.error("Invalid mode selected. Exiting.")
+        return
 
-    data_dir = Path(__file__).parent / 'data'
-    print("Loading data from", data_dir / 'dataset3.csv')
-    # ensure consistent date parsing
-    df = pd.read_csv(data_dir / 'dataset3.csv', parse_dates=['date'],infer_datetime_format=True)
-    df = df.sort_values('date')
-    df_all = df.copy()
-    print(f"Data loaded: {len(df_all)} rows, {df_all['ticker'].nunique()} unique tickers")
+    # Interactive input vs. quick defaults
+    if mode in ['0','1','2']:
+        power     = int(input("Enter power for rolling Hurst (default 6): ") or 6)
+        ticker    = input("Enter ticker (default AAPL): ") or 'AAPL'
+        train_frac= float(input("Enter train fraction (default 0.8): ") or 0.8)
+        test_frac = 1 - train_frac
+        k         = int(input("Enter lag depth k (default 5): ") or 5)
+        xgb_params= {
+            'n_estimators': int(input("Enter n_estimators (100): ") or 100),
+            'learning_rate': float(input("Enter learning_rate (0.1): ") or 0.1)
+        }
+        periods   = int(input("Enter forecast days (default 14): ") or HORIZON)
+    else:
+        power, ticker      = 4, 'AAPL'
+        train_frac, test_frac = 0.8, 0.2
+        k                  = 5
+        xgb_params         = {'n_estimators':100, 'learning_rate':0.1}
+        periods            = HORIZON
 
-    # Global model path
-    model_path = Path(__file__).parent / 'models' / 'hurst_model.json'
-    model_path.parent.mkdir(exist_ok=True)
+    # Load data and filter by ticker symbol
+    df_all = load_data()
+    df_t   = df_all[df_all['ticker']==ticker].sort_values('date')
+    returns= df_t['return'].values
 
-    # Train
-    if train:
-        print("Starting training...")
-        n = 2**power
-        tickers = df_all['ticker'].unique().tolist()
-        selected = random.sample(tickers, min(num_tickers, len(tickers)))
-        print(f"Selected {len(selected)} tickers for training.")
-        X_list, y_list = [], []
-        for t in selected:
-            df_t = df_all[df_all['ticker']==t].sort_values('date')
-            returns_t = df_t['return'].values
-            hurst_vals = compute_rolling_hurst(returns_t, power)
-            start = n - 1
-            hurst_series_t = pd.Series(hurst_vals, index=df_t['date'].values[start:])
-            X_t, y_t, _ = make_lag_features(hurst_series_t, k)
-            X_list.append(X_t)
-            y_list.append(y_t)
-        X_train = np.vstack(X_list)
-        y_train = np.concatenate(y_list)
-        print(f"Aggregated training data: X_train shape {X_train.shape}, y_train shape {y_train.shape}")
-        model = xgb.XGBRegressor(objective='reg:squarederror')
-        model.fit(X_train, y_train)
-        model.save_model(str(model_path))
-        print("Model training completed and saved to", model_path)
+    # Compute rolling Hurst exponent series
+    hurst_vals   = compute_rolling_hurst(returns, power)
+    dates        = df_t['date']
+    start_index  = 2**power - 1
+    hurst_series = pd.Series(hurst_vals, index=dates[start_index:])
 
-    # Evaluate
-    if evaluate:
-        print(f"Starting evaluation for ticker {ticker}...")
-        df_t = df_all[df_all['ticker']==ticker].sort_values('date')
-        returns = df_t['return'].values
-        dates = df_t['date']
-        hurst_vals = compute_rolling_hurst(returns, power)
-        start = 2**power - 1
-        hurst_series = pd.Series(hurst_vals, index=dates[start:])
-        model = xgb.XGBRegressor()
-        model.load_model(str(model_path))
-        X, y, dates_feat = make_lag_features(hurst_series, k)
-        # split data by user‑defined fraction instead of hardcoded 0.8
-        cutoff = int(len(X) * train_frac)
-        X_test, y_test = X[cutoff:], y[cutoff:]
-        dates_test = dates_feat[cutoff:]
-        preds = model.predict(X_test)
-        print(f"Evaluation on {ticker}:")
-        print(f"Test set size: {len(X_test)}")
-        print(f"Predictions: {preds}") 
-        print(f"Actual values: {y_test}")
-        mse = mean_squared_error(y_test, preds)
-        rmse = np.sqrt(mse)
-        mae = mean_absolute_error(y_test, preds)
-        print(f"Evaluation metrics -> RMSE: {rmse:.4f}, MAE: {mae:.4f}")
-        print(dates_test[0], dates_test[-1])
-        plt.figure(figsize=(10,5))
-        plt.plot(dates_test, y_test, label='Actual')
-        plt.plot(dates_test, preds, label='Predicted')
-        plt.title(f'Evaluate Hurst Prediction for {ticker}')
-        plt.legend(); plt.grid(True); plt.show()
-
-    # Forecast
-    if forecast > 0:
-        print(f"Starting forecasting for next {forecast} days on ticker {ticker}...")
-        df_t = df_all[df_all['ticker']==ticker].sort_values('date')
-        returns = df_t['return'].values
-        dates = df_t['date']
-        hurst_vals = compute_rolling_hurst(returns, power)
-        start = 2**power - 1
-        hurst_series = pd.Series(hurst_vals, index=dates[start:])
-        model = xgb.XGBRegressor()
-        model.load_model(str(model_path))
-        history = list(hurst_series.values[-k:])
-        future = []
-        for i in range(forecast):
-            x_in = np.array(history[-k:]).reshape(1, -1)
-            y_hat = model.predict(x_in)[0]
-            future.append(y_hat)
-            history.append(y_hat)
-        last_date = hurst_series.index[-1]
-        future_idx = pd.date_range(last_date + pd.Timedelta(days=1), periods=forecast, freq='B')
-        future_series = pd.Series(future, index=future_idx)
-        print("Forecasted values:")
-        print(future_series)
-        plt.figure(figsize=(10,5))
-        plt.plot(hurst_series.index, hurst_series.values, label='History')
-        plt.plot(future_series.index, future_series.values, '--', label='Forecast')
-        plt.title(f'14-Day Hurst Forecast for {ticker}')
-        plt.legend(); plt.grid(True); plt.show()
-        print("Forecast completed.")
+    # Execute requested action
+    if mode in ['0','4']:
+        train_xgb_only(hurst_series, train_frac, k, xgb_params)
+    elif mode in ['1','5']:
+        xgb_only = joblib.load(MODELS_DIR / 'xgb_only.pkl')
+        evaluate_xgb_only(hurst_series, xgb_only, k, test_frac)
+    elif mode in ['2','6']:
+        xgb_only = joblib.load(MODELS_DIR / 'xgb_only.pkl')
+        df_fc    = forecast_xgb_only(hurst_series, xgb_only, periods, k)
+        logger.info("XGBoost-only forecast:\n%s", df_fc)
+        plt.figure(figsize=(12,6))
+        plt.plot(hurst_series.index, hurst_series.values, 'k-', label='Historical Hurst')
+        plt.plot(df_fc['ds'], df_fc['yhat'], 'g--', label='Forecast')
+        plt.title(f'{periods}-Day Hurst Forecast for {ticker}')
+        plt.xlabel('Date'); plt.ylabel('Hurst Exponent')
+        plt.legend(); plt.grid(True)
+        plt.xticks(rotation=45); plt.tight_layout(); plt.show()
 
 if __name__ == '__main__':
     main()
