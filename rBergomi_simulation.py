@@ -145,41 +145,57 @@ class rBergomi(object):
         S[:,1:] = S0 * np.exp(integral)
         return S
 
-def SimulationofrBergomi(M,N,T,phi,rho,K,X0,H,xi,eta,r):
+def SimulationofrBergomi(M, N, T, phi, rho, K, X0, H, xi, eta, r, days_per_year=252):
     """Simulate paths of rBergomi price, volatility, Brownian motions and I
     M = Number of samples in first simulation, used for LS-regression
-    M2 = Number of samples in Resimulation, typically much larger than M
     N = Number of discretization points for the grid [0,T]
-    N1 = Number of exercise points in [0,T] in the sense of Bermudda-options
-    T = maturiy
+    T = maturity in days
     phi = payoff functions (Put or Call)
     rho = correlation coefficient
     K = depth of Signature
     X0 = log(S0) initial value of log-price
     H = Hurst-parameter for fBm in rBergomi model
     xi,eta = specifications for rBergomi volatility process
-    r = interest-rate 
-    
-    Output:
-        X = stock-price in rBergomi model
+    r = interest-rate
+    days_per_year = number of days in a year (default = 252)
     """
-    tt = np.linspace(0,T,N+1)
-    #Using rBergomi-Package for volatility and Brownian motions
-    rB = rBergomi(N, M, T, -0.5+H)
-    #two independent Brownian motion increments
+    # Convert T from days to years
+    T_years = T / days_per_year
+    
+    # Using rBergomi-Package for volatility and Brownian motions
+    rB = rBergomi(N, M, T_years, -0.5+H)
+    
+    # Two independent Brownian motion increments
     dW1 = rB.dW1()
     dW2 = rB.dW2()
-    #volatility process V,array of Mx(N+1)
+    
+    # Volatility process V, array of Mx(N+1)
     Y = rB.Y(dW1)
     V = rB.V(Y, xi, eta)
-    #price-process in rBergomi
+    
+    # Price-process in rBergomi
     dB = rB.dB(dW1, dW2, rho)
-    X = rB.S(V, dB) #array of Mx(N+1)
-    X = X0*X*np.exp(r*tt)
-    #print('European:',np.mean(np.exp(-r)*phi(X[:,-1])), 'MC-Error:', np.std(np.exp(-r)*phi(X[:,-1]))/np.sqrt(M))
-    I = np.zeros(shape = (M,int(T*N)+1))
-    for n in range(int(T*N)):
+    X = rB.S(V, dB)  # array of Mx(N+1)
+    
+    # Get the shape of X to determine the time grid
+    M_paths, N_times = X.shape
+    
+    # Create a time grid that matches the shape of X
+    tt = np.linspace(0, T_years, N_times)
+    
+    # Apply the interest rate factor with broadcasting that matches X's shape
+    r_factor = np.exp(r * tt)
+    X = X0 * X * r_factor[np.newaxis, :]
+    
+    # Calculate time steps based on actual array shape
+    steps = N_times
+    time_steps = steps - 1  # Adjust for zero-indexing
+    I = np.zeros(shape=(M, steps))
+    
+    for n in range(time_steps):
         I[:,n+1] = I[:,n] + np.sqrt(V[:,n])*dW1[:,n,0]
-    dI = I[:,1:int(T*N)+1]-I[:,0:int(T*N)]
-    dI = dI.reshape(M,int(T*N),1)
-    return X,V,I,dI,dW1,dW2,dB,Y
+    
+    dI = I[:,1:steps] - I[:,0:time_steps]
+    dI = dI.reshape(M, time_steps, 1)
+    
+    return X, V, I, dI, dW1, dW2, dB, Y

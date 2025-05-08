@@ -7,5 +7,7 @@
     "python.pythonPath": "/Users/roshanshah1/.venv/bin/python",
     "python.analysis.diagnosticSeverityOverrides": {
         "reportMissingImports": "none"
-    }
+    },
+    "workbench.preferredHighContrastLightColorTheme": "Default Dark Modern",
+    "workbench.preferredLightColorTheme": "Default Dark Modern"
 }

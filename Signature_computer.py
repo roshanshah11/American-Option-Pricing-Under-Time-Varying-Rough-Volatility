@@ -20,22 +20,40 @@ class SignatureComputer:
     """
     Computes signatures of augmented paths
     Attributes:
-           T (float): The time horizon for the option.
+           T (float): The time horizon for the option in days.
            N (int): The number of time steps.
            K (int): The truncation level for signatures.
            signature_spec (str): Specifies 'linear' or 'log' signatures.
            signature_lift (str): The type of signature lift to apply.
            poly_degree (int): The degree of polynomial features to add.
+           days_per_year (int): Number of trading days per year.
     """
-    def __init__(self, T, N, K, signature_spec, signature_lift, poly_degree):
-        self.T = T
+    def __init__(self, T, N, K, signature_spec, signature_lift, poly_degree, days_per_year=252):
+        """
+        Initialize the SignatureComputer.
+        
+        Args:
+            T (float): The time horizon for the option in days.
+            N (int): The number of time steps.
+            K (int): The truncation level for signatures.
+            signature_spec (str): Specifies 'linear' or 'log' signatures.
+            signature_lift (str): The type of signature lift to apply.
+            poly_degree (int): The degree of polynomial features to add.
+            days_per_year (int): Number of trading days per year. Default is 252.
+        """
+        self.T = T  # Keep original T in days
+        self.T_years = T / days_per_year  # Convert to years for financial calculations
         self.N = N
         self.K = K
         self.signature_spec = signature_spec
         self.signature_lift = signature_lift
         self.poly_degree = poly_degree
+        self.days_per_year = days_per_year
+        
+        # Time grid should match what's used in the notebook (scale of T)
         self.tt = np.linspace(0, T, N+1)
-    def compute_signature(self, X, vol, A, Payoff,dW,I,MM):
+        
+    def compute_signature(self, X, vol, A, Payoff, dW, I, MM):
         """
         Computes the signature of the augmented path X, vol, A, Payoff
         X = state process, array of Mx(N+1)
@@ -51,74 +69,72 @@ class SignatureComputer:
         """
         print(f"Computing {self.signature_spec} signature with {self.signature_lift} lift")
         if self.signature_spec == "linear":
-            result = self._compute_linear_signature(X, vol, A, Payoff,dW,I,MM)
+            result = self._compute_linear_signature(X, vol, A, Payoff, dW, I, MM)
         elif self.signature_spec == "log":
-            result = self._compute_log_signature(X, vol, A, Payoff,dW,I,MM)
+            result = self._compute_log_signature(X, vol, A, Payoff, dW, I, MM)
         else:
             raise ValueError(f"Invalid signature_spec: {self.signature_spec}")
         
-        
         return result
 
-    def _compute_linear_signature(self, X, vol, A, Payoff,dW,I,MM):
+    # The rest of the methods remain unchanged
+    def _compute_linear_signature(self, X, vol, A, Payoff, dW, I, MM):
         """
         Computes the linear signature of the augmented path X, vol, A, Payoff, for differnet choices of signature lift.
-        normal: signature of the augmented path (a,X)
-        payoff-extended: signature of the augmented path (A,X,Payoff)
-        delay: signature of the augmented path (A,X,X_delay)
-        polynomial-extended: signature of the augmented path (X,A) + Laguerre polynomials of X
-        payoff-and-polynomial-extended: signature of the augmented path (A,X,Payoff) + Laguerre polynomials of (X,vol)
-        polynomial-vol: signature of the augmented path (A,vol) + Laguerre polynomials of X
         """
+        # Get the actual number of time steps from the data
+        actual_N = X.shape[1] - 1
+        
         dX = X[:, 1:] - X[:, :-1]
         dvol = vol[:,1:]-vol[:,:-1]
         dI = I[:,1:]-I[:,:-1]
         dM = MM[:,1:]-MM[:,:-1]
         dP = Payoff[:, 1:] - Payoff[:, :-1]
+        
         if self.signature_lift == "normal":
-            return self._signatureQV(self.tt, dX.reshape(X.shape[0], self.N, 1), A)
+            return self._signatureQV(self.tt[:actual_N+1], dX, A[:,:actual_N+1])
         if self.signature_lift == "Brownian":
-            return self._signatureQV(self.tt, dW, A)
+            return self._signatureQV(self.tt[:actual_N+1], dW[:,:actual_N], A[:,:actual_N+1])
         elif self.signature_lift == "payoff-extended":
             dP = Payoff[:, 1:] - Payoff[:, :-1]
             dXX = np.stack((dP, dX), axis=-1)
-            return self._signatureQV(self.tt, dXX, A)
+            return self._signatureQV(self.tt[:actual_N+1], dXX, A[:,:actual_N+1])
         elif self.signature_lift == "delay":
             dW_delay = np.zeros_like(dX)
             dW_delay[:, 1:] = dW[:, :-1]
-            dXX = np.stack((dW, dW_delay), axis=-1)
+            dXX = np.stack((dW[:,:actual_N], dW_delay[:,:actual_N]), axis=-1)
             States = np.zeros((X.shape[0],X.shape[1],3))
             States[:,:,2] = vol
             States[:,:,0] = Payoff
             States[:,:,1] = X
-            Sig = self._signatureQV(self.tt, dXX, A)
+            Sig = self._signatureQV(self.tt[:actual_N+1], dXX, A[:,:actual_N+1])
             return np.concatenate((Sig, States), axis=-1)
         elif self.signature_lift == "polynomial-extended":
-            Sig = self._signatureQV(self.tt, dX.reshape(X.shape[0], self.N, 1), A)
-            States= np.zeros((X.shape[0],X.shape[1],1))
+            Sig = self._signatureQV(self.tt[:actual_N+1], dX, A[:,:actual_N+1])
+            States = np.zeros((X.shape[0],X.shape[1],1))
             States[:,:,0] = Payoff
             return np.concatenate((Sig, States), axis=-1)
         elif self.signature_lift == "payoff-and-polynomial-extended":
             dP = Payoff[:, 1:] - Payoff[:, :-1]
             dXX = np.stack((dX, dP), axis=-1)
-            Sig = self._signatureQV(self.tt, dXX, A)
+            Sig = self._signatureQV(self.tt[:actual_N+1], dXX, A[:,:actual_N+1])
             Poly = self._compute_polynomials_2dim(X,vol)
             return np.concatenate((Sig, Poly), axis=-1)
         elif self.signature_lift == "logprice-payoff-vol-sig":
-            Sig = self._signatureQV(self.tt, dvol.reshape(X.shape[0], self.N, 1), A)
+            Sig = self._signatureQV(self.tt[:actual_N+1], dvol, A[:,:actual_N+1])
             States = np.zeros((X.shape[0],X.shape[1],3))
             States[:,:,0] = X
             States[:,:,1] = vol
             States[:,:,2] = X*vol
             return np.concatenate((Sig, States), axis=-1)
         elif self.signature_lift == "vol-payoff-logprice-sig":
-            Sig = self._signatureQV(self.tt, dX.reshape(X.shape[0], self.N, 1), A)
+            Sig = self._signatureQV(self.tt[:actual_N+1], dX, A[:,:actual_N+1])
             States = np.zeros((X.shape[0],X.shape[1],2))
             States[:,:,0] = vol
             States[:,:,1] = vol*X
             return np.concatenate((Sig, States), axis=-1)
         elif self.signature_lift == "logprice-vol-Brownian-sig":
-            Sig = self._signatureQV(self.tt, dW.reshape(X.shape[0], self.N, 1), A)
+            Sig = self._signatureQV(self.tt[:actual_N+1], dW[:,:actual_N], A[:,:actual_N+1])
             States = np.zeros((X.shape[0],X.shape[1],3))
             States[:,:,2] = vol
             States[:,:,0] = Payoff
@@ -126,32 +142,27 @@ class SignatureComputer:
             return np.concatenate((Sig, States), axis=-1)
         elif self.signature_lift == "vol-payoff-logprice-extended":
             dP = Payoff[:, 1:] - Payoff[:, :-1]
-            dXX = np.stack((dP, dW), axis=-1)
+            dXX = np.stack((dP, dW[:,:actual_N]), axis=-1)
             States = np.zeros((X.shape[0],X.shape[1],3))
             States[:,:,0] = Payoff
             States[:,:,1] = X
             States[:,:,2] = vol
-            Sig = self._signatureQV(self.tt, dXX, A)
+            Sig = self._signatureQV(self.tt[:actual_N+1], dXX, A[:,:actual_N+1])
             return np.concatenate((Sig, States), axis=-1)
         elif self.signature_lift == "price-brownian-lift":
-            
-            dXX = np.stack((dX, dW), axis=-1)
-            return self._signatureQV(self.tt, dXX, A)
+            dXX = np.stack((dX, dW[:,:actual_N]), axis=-1)
+            return self._signatureQV(self.tt[:actual_N+1], dXX, A[:,:actual_N+1])
         elif self.signature_lift == "polynomial-vol":
-            Sig = self._signatureQV(self.tt, dvol.reshape(X.shape[0], self.N, 1), A)
+            # Don't use reshape, pass dvol directly
+            Sig = self._signatureQV(self.tt[:actual_N+1], dvol[:,:,np.newaxis], A[:,:actual_N+1])
             Poly = self._compute_polynomials(X)
             return np.concatenate((Sig, Poly), axis=-1)
         else:
             raise ValueError(f"Invalid signature_lift for linear signature: {self.signature_lift}")
-    def _compute_log_signature(self, X, vol, A, Payoff,dW,I,MM):
+    
+    def _compute_log_signature(self, X, vol, A, Payoff, dW, I, MM):
         """
         Computes the log signature of the augmented path X, vol, A, Payoff, for differnet choices of signature lift.
-        normal: log signature of the augmented path (a,X)
-        payoff-extended: log signature of the augmented path (A,X,Payoff)
-        delay: log signature of the augmented path (A,X,X_delay)
-        polynomial-extended: log signature of the augmented path (X,A) + Laguerre polynomials of X
-        payoff-and-polynomial-extended: log signature of the augmented path (A,X,Payoff) + Laguerre polynomials of (X,vol)
-        polynomial-vol: log signature of the augmented path (A,vol) + Laguerre polynomials of X
         """
         dX = X[:, 1:] - X[:, :-1]
         dvol = vol[:, 1:] - vol[:, :-1]
@@ -177,8 +188,8 @@ class SignatureComputer:
             Poly = self._compute_polynomials(X)
             return np.concatenate((Sig, Poly), axis=-1)
         elif self.signature_lift == "payoff-and-polynomial-extended":
-            dP = Payoff[:, 1:] - Payoff[:, :-1]
             XX = np.stack([A, X, Payoff], axis=-1)
+            Sig = self._full_log_signature(XX)
             Poly = self._compute_polynomials_2dim(X,vol)
             return np.concatenate((Sig, Poly), axis=-1)
         elif self.signature_lift == "logprice-payoff-vol-sig":
@@ -222,7 +233,8 @@ class SignatureComputer:
         for k in range(self.poly_degree):
             Polynomials[:,:,k] = sc.laguerre(k+1)(X)
         return Polynomials
-    def _compute_polynomials_2dim(self, X,vol):
+    
+    def _compute_polynomials_2dim(self, X, vol):
         """
         Computes the Laguerre polynomials of (X,vol)
         """
@@ -234,11 +246,13 @@ class SignatureComputer:
                 C[k,j] = 1
                 Polynomials[:,:,int(k*(k+1)/2+j)] = np.polynomial.laguerre.lagval2d(X,vol, C)
         return Polynomials
-    def _signature_ONB_basis(self,tGrid,X,deg):
+    
+    def _signature_ONB_basis(self, tGrid, X, deg):
         sig = np.zeros((X.shape[0],X.shape[1],deg))
         for i in range(deg):
             sig[:,1:,i]= 1/math.factorial(i+1)*np.cumsum(X[:,:-1]*(tGrid[:-1])**(i+1),axis=1)/(X.shape[1])
         return sig
+    
     def _signatureQV(self, tGrid, dx, QV):
         """
         Compute the signature of a path (t,x,[x]) up to degree K.
@@ -291,9 +305,6 @@ class SignatureComputer:
         z = np.concatenate((QV, x), axis=2)
         return M, d, z  # d+1 because we added the QV dimension
 
-
-    
-
     def _full_log_signature(self, X):
         """
         Compute the full log signature of the given paths.
@@ -317,6 +328,7 @@ class SignatureComputer:
                 # compute logsig for each time step i for batch
                 log_sig[start:end, i] = ii.logsig(X_batch[:, :i+1], bch, 'C')
         return log_sig
+    
     def _full_log_signature_dim_two_level_three(self, X, deg):
         """
         Compute the full log signature for 2D paths up to level 3.

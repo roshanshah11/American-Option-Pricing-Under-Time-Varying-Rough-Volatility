@@ -7,13 +7,8 @@ import pandas as pd               # data manipulation (DataFrame)
 import matplotlib.pyplot as plt   # plotting library for visualization
 from pathlib import Path          # convenient filesystem path handling
 from sklearn.metrics import mean_squared_error, mean_absolute_error # error metrics for model evaluation
-from concurrent.futures import ProcessPoolExecutor
-from typing import Tuple, List, Optional
 import logging                    # logging status and debug messages
 import joblib                     # saving/loading Python objects (models)
-import seaborn as sns
-from datetime import datetime, timedelta
-import json
 from xgboost import XGBRegressor  # XGBoost regression model
 
 # Forecast horizon depth (how many days ahead to predict)

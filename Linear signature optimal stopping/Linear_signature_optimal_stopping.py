@@ -216,31 +216,84 @@ class LinearDualPricer:
         MG_testing : numpy array
             Doob martingale approximation
         """
-        M, _, D = S_training_sig.shape
-        M2, _, _ = S_testing_sig.shape
-        subindex = [int((j+1)*self.N/self.N1) for j in range(self.N1)]
-        subindex2 = [int((j)*self.N/self.N1) for j in range(self.N1+1)]
-        MG_training = np.zeros((M,self.N+1,D))
+        M, N_sig, D = S_training_sig.shape
+        M2, N_sig_test, _ = S_testing_sig.shape
+        
+        # Get the number of time steps from the Brownian increments
+        N_dW = dW_training.shape[1]
+        N_dW_test = dW_testing.shape[1]
+        
+        # Use the minimum number of time steps between signature, dW, and self.N
+        N_common = min(N_sig, N_dW, self.N)
+        N_common_test = min(N_sig_test, N_dW_test, self.N)
+        
+        print(f"Using {N_common} time steps for training data")
+        
+        # Recalculate subindices based on actual data dimensions
+        subindex = [int((j+1)*N_common/self.N1) for j in range(self.N1)]
+        subindex2 = [int((j)*N_common/self.N1) for j in range(self.N1+1)]
+        
+        MG_training = np.zeros((M, N_common+1, D))
         for dd in range(D):
-            MG_training[:,1:self.N+1,dd] = np.cumsum(S_training_sig[:,0:self.N,dd]*dW_training,axis=1)
+            # Ensure both operands have the same dimension
+            MG_training[:,1:N_common+1,dd] = np.cumsum(
+                S_training_sig[:,0:N_common,dd] * dW_training[:,0:N_common],
+                axis=1
+            )
+        
         if self.LP_solver == "Gurobi":
-            solver = LPSolver(F=Payoff_training, tt=np.linspace(0, self.T, self.N1 + 1), N1=self.N1, N=self.N, D=D, M=M, Y=MG_training[:,subindex2,:], subindex=subindex2)
+            solver = LPSolver(
+                F=Payoff_training[:,:N_common+1], 
+                tt=np.linspace(0, self.T, self.N1 + 1), 
+                N1=self.N1, 
+                N=N_common, 
+                D=D, 
+                M=M, 
+                Y=MG_training[:,subindex2,:], 
+                subindex=subindex2
+            )
             res = solver.solve_gurobi()
         elif self.LP_solver == "CVXPY":
-            solver = LPSolver(F=Payoff_training, tt=np.linspace(0, self.T, self.N1 + 1), N1=self.N1, N=self.N, D=D, M=M, Y=MG_training[:,subindex2,:], subindex=subindex2)
+            solver = LPSolver(
+                F=Payoff_training[:,:N_common+1], 
+                tt=np.linspace(0, self.T, self.N1 + 1), 
+                N1=self.N1, 
+                N=N_common, 
+                D=D, 
+                M=M, 
+                Y=MG_training[:,subindex2,:], 
+                subindex=subindex2
+            )
             res = solver.solve_cvxpy()
         else:
             raise ValueError(f"Invalid LP solver: {self.LP_solver}")
-        # Testing for fresh samples
-        MG_testing = np.zeros((M2,self.N+1,D))
-        for dd in range(D):
-            MG_testing[:,1:self.N+1,dd] = np.cumsum(S_testing_sig[:,0:self.N,dd]*dW_testing,axis=1)
-
-        # Compute the upper bound and standard deviation
         
-        upper_bound = np.mean(np.max(Payoff_testing[:,subindex]-np.dot(MG_testing,res)[:,subindex],axis=1))
-        upper_bound_std = np.std(np.max(Payoff_testing[:, subindex] - np.dot(MG_testing,res)[:,subindex], axis=1))
+        # Testing for fresh samples
+        MG_testing = np.zeros((M2, N_common_test+1, D))
+        for dd in range(D):
+            # Ensure both operands have the same dimension
+            MG_testing[:,1:N_common_test+1,dd] = np.cumsum(
+                S_testing_sig[:,0:N_common_test,dd] * dW_testing[:,0:N_common_test],
+                axis=1
+            )
 
+        # Ensure we're using valid indices for the testing data
+        test_subindex = [idx for idx in subindex if idx <= N_common_test]
+        
+        # Compute the upper bound and standard deviation
+        upper_bound = np.mean(
+            np.max(
+                Payoff_testing[:,test_subindex] - np.dot(MG_testing, res)[:,test_subindex],
+                axis=1
+            )
+        )
+        
+        upper_bound_std = np.std(
+            np.max(
+                Payoff_testing[:,test_subindex] - np.dot(MG_testing, res)[:,test_subindex],
+                axis=1
+            )
+        ) / np.sqrt(M2)  # Divide by sqrt(M2) to get standard error
 
         return upper_bound, upper_bound_std, MG_testing
 
