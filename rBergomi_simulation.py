@@ -145,7 +145,7 @@ class rBergomi(object):
         S[:,1:] = S0 * np.exp(integral)
         return S
 
-def SimulationofrBergomi(M, N, T, phi, rho, K, X0, H, xi, eta, r, days_per_year=252):
+def SimulationofrBergomi(M, N, T_years, phi, rho, K, X0, H, xi, eta, r, days_per_year=252):
     """Simulate paths of rBergomi price, volatility, Brownian motions and I
     M = Number of samples in first simulation, used for LS-regression
     N = Number of discretization points for the grid [0,T]
@@ -159,8 +159,6 @@ def SimulationofrBergomi(M, N, T, phi, rho, K, X0, H, xi, eta, r, days_per_year=
     r = interest-rate
     days_per_year = number of days in a year (default = 252)
     """
-    # Convert T from days to years
-    T_years = T / days_per_year
     
     # Using rBergomi-Package for volatility and Brownian motions
     rB = rBergomi(N, M, T_years, -0.5+H)

@@ -331,7 +331,7 @@ class DeepDualPricer:
         self.layer_normalization = layer_normalization
 
     def price(self, S_training_sig, Payoff_training, dW_training, S_testing_sig, Payoff_testing, dW_testing,
-              M_val, batch=32, epochs=100, learning_rate=0.001):
+          M_val, batch=32, epochs=100, learning_rate=0.001):
         """
         Parameters
         ----------
@@ -356,13 +356,34 @@ class DeepDualPricer:
         learning_rate : float
             Learning rate for training
         """
-        M, _, D = S_training_sig.shape
-        M2, _, _ = S_testing_sig.shape
-        subindex = [int((j+1)*self.N/self.N1) for j in range(self.N1)]
-        subindex2 = [int((j)*self.N/self.N1) for j in range(self.N1+1)]
+        M, N_sig, D = S_training_sig.shape
+        M2, N_sig_test, _ = S_testing_sig.shape
+        
+        # Get dimensions from all inputs
+        _, dW_steps = dW_training.shape
+        _, payoff_steps = Payoff_training.shape
+        
+        # Use dW dimensions as the base since model expects matching dimensions
+        N_actual = dW_steps  # This should match dW_training.shape[1]
+        
+        # Print dimensions for debugging
+        print(f"Signature data shape: {S_training_sig.shape}")
+        print(f"Payoff data shape: {Payoff_training.shape}")
+        print(f"dW data shape: {dW_training.shape}")
+        print(f"Using {N_actual} time steps instead of {self.N} for model building")
+        
+        # Use the actual time steps from the data for subindices
+        subindex = [int((j+1)*N_actual/self.N1) for j in range(self.N1)]
+        subindex2 = [int((j)*N_actual/self.N1) for j in range(self.N1+1)]
+        
+        # Make sure indices don't exceed the data dimensions
+        subindex = [min(idx, N_actual-1) for idx in subindex]
+        subindex2 = [min(idx, N_actual) for idx in subindex2]
+        
+        # Build the network model using the actual time steps
         model, rule_model = DualNetworkModel(
             n=self.N1 + 1,
-            n2=self.N + 1,
+            n2=N_actual + 1,  # Use actual time steps, not self.N
             I=self.layers,
             q=self.nodes + D,
             d=D,
@@ -384,26 +405,50 @@ class DeepDualPricer:
 
         early_stopping = EarlyStopping(monitor='val_loss', patience=5)
         
+        # Important: Trim Payoff to exactly N_actual steps, not N_actual+1
+        # This matches the expected input dimensions in the model
+        Payoff_train_trimmed = Payoff_training[:, :N_actual]
+        Payoff_test_trimmed = Payoff_testing[:, :N_actual]
+        
+        print(f"Model expects Payoff shape: (batch_size, {N_actual})")
+        print(f"Trimmed Payoff shape: {Payoff_train_trimmed.shape}")
+        
+        # Fit the model with the correctly sized inputs
         model.fit(
-            [S_training_sig[:M_val, :, :], Payoff_training[:M_val, 1:self.N+1], dW_training[:M_val, :]],
+            [S_training_sig[:M_val], Payoff_train_trimmed[:M_val], dW_training[:M_val]],
             y=None,
             batch_size=batch,
             epochs=epochs,
             verbose=1,
-            validation_data=([S_training_sig[M_val:], Payoff_training[M_val:, 1:self.N+1], dW_training[M_val:, :]], None),
+            validation_data=([S_training_sig[M_val:], Payoff_train_trimmed[M_val:], dW_training[M_val:]], None),
             callbacks=[early_stopping]
         )
 
         # Testing for fresh samples
-        res = model.predict([S_testing_sig, Payoff_testing[:, 1:self.N+1], dW_testing])
+        res = model.predict([S_testing_sig, Payoff_test_trimmed, dW_testing])
         MG = rule_model.predict([S_testing_sig, dW_testing])
-        MG = np.concatenate((np.zeros((M2,1)), MG), axis=-1)
-
-        # Compute the upper bound and standard deviation
         
-        upper_bound = np.mean(np.max(Payoff_testing[:, subindex2] - MG[:, subindex2], axis=1))
-        upper_bound_std = np.std(np.max(Payoff_testing[:, subindex2] - MG[:, subindex2], axis=1))
-
+        print(f"MG shape: {MG.shape}")
+        
+        # --- FIX: Handle case where MG shape doesn't match expected dimensions ---
+        # If MG has more columns than expected, trim it to match N_actual
+        if MG.shape[1] > N_actual:
+            print(f"Trimming MG from {MG.shape} to (M2, {N_actual})")
+            MG = MG[:, :N_actual]
+        
+        # Create MG with zeros prepended, now with correct dimensions
+        MG_with_zeros = np.concatenate((np.zeros((M2, 1)), MG), axis=-1)
+        print(f"MG with zeros shape: {MG_with_zeros.shape}")
+        
+        # Calculate the upper bound using your original approach
+        # Just make sure to use Payoff_testing dimensions that match MG_with_zeros
+        valid_indices = [idx for idx in subindex2 if idx < N_actual+1]
+        diffs = Payoff_testing[:, valid_indices] - MG_with_zeros[:, valid_indices]
+        max_diffs = np.max(diffs, axis=1)
+        
+        upper_bound = np.mean(max_diffs)
+        upper_bound_std = np.std(max_diffs)
+        
         y0 = np.mean(res)
 
         return y0, upper_bound, upper_bound_std, model, rule_model
@@ -640,10 +685,41 @@ class DualNetworkModel:
         dnn_output = reduce(lambda x, f: f(x), [input_logsig] + dnn_layers)
 
         rule_layer = DeepMartingales()([dnn_output[:, 0:self.n2-1], input_BM])
-        loss_layer = DualStoppingLoss()([
-            rule_layer[:, int((self.n2-1)/(self.n-1))-1:self.n2:int((self.n2-1)/(self.n-1))],
-            input_y[:, int((self.n2-1)/(self.n-1))-1:self.n2:int((self.n2-1)/(self.n-1))]
-        ])
+        
+        # The problem is that we need indices for self.n exercise dates 
+        # But our tensor only has self.n2-1 available indices (0 to self.n2-2)
+        
+        # Calculate indices ensuring they're all valid
+        valid_indices = []
+        
+        # We need exactly self.n-1 indices (for all exercise dates after the first)
+        n_indices_needed = self.n - 1
+        
+        # If we have fewer time steps than exercise dates, we'll need to reuse some indices
+        if n_indices_needed <= self.n2-1:
+            # We have enough unique indices, distribute them evenly
+            for i in range(n_indices_needed):
+                # Calculate linearly spaced indices
+                idx = int(i * (self.n2-1) / (n_indices_needed))
+                valid_indices.append(idx)
+        else:
+            # We have more exercise dates than time steps
+            # Use all available indices and repeat the last one if needed
+            valid_indices = list(range(self.n2-1))
+            # Add the last index repeatedly until we have enough
+            while len(valid_indices) < n_indices_needed:
+                valid_indices.append(self.n2-2)
+        
+        print(f"Using indices: {valid_indices} for {n_indices_needed} exercise dates")
+        
+        # Convert to TensorFlow constant to avoid conversion issues
+        tf_indices = tf.constant(valid_indices, dtype=tf.int32)
+        
+        # Use tf.gather with the properly calculated indices
+        rule_exercise = tf.gather(rule_layer, tf_indices, axis=1)
+        y_exercise = tf.gather(input_y, tf_indices, axis=1)
+        
+        loss_layer = DualStoppingLoss()([rule_exercise, y_exercise])
 
         model = tf.keras.Model([input_logsig, input_y, input_BM], loss_layer)
         rule_model = tf.keras.Model([input_logsig, input_BM], rule_layer)

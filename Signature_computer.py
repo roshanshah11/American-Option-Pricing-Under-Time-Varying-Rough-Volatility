@@ -164,63 +164,86 @@ class SignatureComputer:
         """
         Computes the log signature of the augmented path X, vol, A, Payoff, for differnet choices of signature lift.
         """
-        dX = X[:, 1:] - X[:, :-1]
-        dvol = vol[:, 1:] - vol[:, :-1]
-        W = np.zeros((X.shape[0],X.shape[1]))
-        W[:,1:] = np.cumsum(dW,axis=1)
+        # Get actual dimensions from data
+        M, T_steps_X = X.shape
+        _, T_steps_vol = vol.shape
+        _, T_steps_A = A.shape
+        
+        # Use the minimum dimension for all operations
+        common_steps = min(T_steps_X, T_steps_vol, T_steps_A)
+        
+        # Print dimensions for debugging
+        print(f"X shape: {X.shape}, vol shape: {vol.shape}, A shape: {A.shape}")
+        print(f"Using {common_steps} time steps for log signature computation")
+        
+        # Calculate increments based on common dimensions
+        dX = X[:, 1:common_steps] - X[:, :common_steps-1]
+        dvol = vol[:, 1:common_steps] - vol[:, :common_steps-1]
+        
+        # Truncate arrays to common dimension
+        X_common = X[:, :common_steps]
+        vol_common = vol[:, :common_steps]
+        A_common = A[:, :common_steps]
+        Payoff_common = Payoff[:, :common_steps]
+        
+        # Calculate Brownian path if needed (using common dimensions)
+        if dW is not None and dW.shape[1] >= common_steps-1:
+            W = np.zeros((X.shape[0], common_steps))
+            W[:,1:] = np.cumsum(dW[:,:common_steps-1], axis=1)
+        else:
+            W = np.zeros((X.shape[0], common_steps))
+        
         if self.signature_lift == "normal":
-            XX = np.stack([A, X], axis=-1)
+            XX = np.stack([A_common, X_common], axis=-1)
             return self._full_log_signature(XX)
         elif self.signature_lift == "payoff-extended":
-            XX = np.stack([A, X], axis=-1)
+            XX = np.stack([A_common, X_common], axis=-1)
             Sig = self._full_log_signature(XX)
-            States = np.zeros((X.shape[0],X.shape[1],1))
-            States[:,:,0] = Payoff
+            States = np.zeros((M, common_steps, 1))
+            States[:,:,0] = Payoff_common
             return np.concatenate((Sig, States), axis=-1)
         elif self.signature_lift == "delay":
-            X_delay = np.zeros_like(X)
-            X_delay[:, 1:] = X[:, :-1]
-            XX = np.stack([A, X, X_delay], axis=-1)
+            X_delay = np.zeros_like(X_common)
+            X_delay[:, 1:] = X_common[:, :-1]
+            XX = np.stack([A_common, X_common, X_delay], axis=-1)
             return self._full_log_signature(XX)
         elif self.signature_lift == "polynomial-extended":
-            XX = np.stack([A, vol], axis=-1)
+            XX = np.stack([A_common, vol_common], axis=-1)
             Sig = self._full_log_signature(XX)
-            Poly = self._compute_polynomials(X)
+            Poly = self._compute_polynomials(X_common)
             return np.concatenate((Sig, Poly), axis=-1)
         elif self.signature_lift == "payoff-and-polynomial-extended":
-            XX = np.stack([A, X, Payoff], axis=-1)
+            XX = np.stack([A_common, X_common, Payoff_common], axis=-1)
             Sig = self._full_log_signature(XX)
-            Poly = self._compute_polynomials_2dim(X,vol)
+            Poly = self._compute_polynomials_2dim(X_common, vol_common)
             return np.concatenate((Sig, Poly), axis=-1)
         elif self.signature_lift == "logprice-payoff-vol-sig":
-            XX = np.stack([A, vol], axis=-1)
+            XX = np.stack([A_common, vol_common], axis=-1)
             Sig = self._full_log_signature(XX)
-            States = np.zeros((X.shape[0],X.shape[1],2))
+            States = np.zeros((M, common_steps, 2))
             States[:,:,1] = W
-            States[:,:,0] = X
-            #States[:,:,1] = Payoff
+            States[:,:,0] = X_common
             return np.concatenate((Sig, States), axis=-1)
         elif self.signature_lift == "vol-payoff-logprice-sig":
-            XX = np.stack([A,X], axis=-1)
+            XX = np.stack([A_common, X_common], axis=-1)
             Sig = self._full_log_signature(XX)
-            States = np.zeros((X.shape[0],X.shape[1],2))
-            States[:,:,0] = vol
-            States[:,:,1] = Payoff
+            States = np.zeros((M, common_steps, 2))
+            States[:,:,0] = vol_common
+            States[:,:,1] = Payoff_common
             return np.concatenate((Sig, States), axis=-1)
         elif self.signature_lift == "polynomial-vol":
-            # Use specialized 2D log-signature for degree <=3 to avoid ii.prepare overflow
-            XX = np.stack([A, vol], axis=-1)
+            # Make sure A and vol have the same shape before stacking
+            XX = np.stack([A_common, vol_common], axis=-1)
             Sig = self._full_log_signature_dim_two_level_three(XX, self.K)
-            Poly = self._compute_polynomials(X)
+            Poly = self._compute_polynomials(X_common)
             return np.concatenate((Sig, Poly), axis=-1)
         elif self.signature_lift == "logprice-vol-Brownian-sig":
-            XX = np.stack([A,W], axis=-1)
+            XX = np.stack([A_common, W], axis=-1)
             Sig = self._full_log_signature(XX)
-            States = np.zeros((X.shape[0],X.shape[1],3))
-            States[:,:,2] = vol*X
-            States[:,:,0] = X
-            States[:,:,1] = vol
-            
+            States = np.zeros((M, common_steps, 3))
+            States[:,:,2] = vol_common*X_common
+            States[:,:,0] = X_common
+            States[:,:,1] = vol_common
             return np.concatenate((Sig, States), axis=-1)
         else:
             raise ValueError(f"Invalid signature_lift for log signature: {self.signature_lift}")

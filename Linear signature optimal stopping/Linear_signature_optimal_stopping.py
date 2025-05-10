@@ -24,7 +24,7 @@ class LinearLongstaffSchwartzPricer:
         N1 : int
             Number of exercise dates for optimal stopping
         T : float
-            Time horizon for the option
+            Time horizon for the option in years
         r : float
             Risk-free interest rate
         mode : str
@@ -33,7 +33,7 @@ class LinearLongstaffSchwartzPricer:
             Ridge parameter for regularization
         """
         self.N1 = N1
-        self.T = T
+        self.T = T  # T is already in years
         self.r = r
         self.mode = mode
         self.ridge = ridge
@@ -163,9 +163,6 @@ class LinearLongstaffSchwartzPricer:
 class LinearDualPricer:
     """
     Computes the upper bound of optimal stopping problem using linear programming based on the martingale representation of the option.
-
-    
-
     """
     def __init__(self, N1, N, T, r, LP_solver="Gurobi"):
         """
@@ -176,7 +173,7 @@ class LinearDualPricer:
         N : int
             Number of discretization times (typically N>>N1)
         T : float
-            Time horizon for the option
+            Time horizon for the option in years
         r : float
             Risk-free interest rate
         LP_solver : str
@@ -184,69 +181,42 @@ class LinearDualPricer:
         """
         self.N1 = N1
         self.N = N
-        self.T = T
+        self.T = T  # T is already in years
         self.r = r
         self.LP_solver = LP_solver
 
     def price(self, S_training_sig, Payoff_training, dW_training, S_testing_sig, Payoff_testing, dW_testing):
         """
         Computes the upper bound for the price of a path-dependent option using signature martingale representation.
-
-        Parameters
-        ----------
-        S_training_sig : numpy array
-            Signature (+ possibly polynomial features) of the augmented path for the training set
-        Payoff_training : numpy array
-            Payoff for training paths
-        dW_training : numpy array
-            Increments of the Brownian motion for the training paths
-        S_testing_sig : numpy array
-            Signature (+ possibly polynomial features) of the augmented path for the testing set
-        Payoff_testing : numpy array
-            Payoff for testing paths
-        dW_testing : numpy array
-            Increments of the Brownian motion for the testing paths
-        
-        Returns
-        -------
-        upper_bound : float
-            Upper bound for the price of the option
-        upper_bound_std : float
-            Standard deviation of the upper bound
-        MG_testing : numpy array
-            Doob martingale approximation
         """
         M, N_sig, D = S_training_sig.shape
         M2, N_sig_test, _ = S_testing_sig.shape
         
-        # Get the number of time steps from the Brownian increments
-        N_dW = dW_training.shape[1]
-        N_dW_test = dW_testing.shape[1]
+        # Get the actual number of time steps from the data
+        actual_steps = Payoff_training.shape[1] - 1  # -1 because N is the count of steps, not points
         
-        # Use the minimum number of time steps between signature, dW, and self.N
-        N_common = min(N_sig, N_dW, self.N)
-        N_common_test = min(N_sig_test, N_dW_test, self.N)
+        # Use the smaller of the model's N and the actual data dimensions
+        N_used = min(self.N, actual_steps)
         
-        print(f"Using {N_common} time steps for training data")
+        # Use indices based on actual data dimensions
+        subindex = [min(int((j+1)*N_used/self.N1), N_used) for j in range(self.N1)]
+        subindex2 = [min(int((j)*N_used/self.N1), N_used) for j in range(self.N1+1)]
         
-        # Recalculate subindices based on actual data dimensions
-        subindex = [int((j+1)*N_common/self.N1) for j in range(self.N1)]
-        subindex2 = [int((j)*N_common/self.N1) for j in range(self.N1+1)]
-        
-        MG_training = np.zeros((M, N_common+1, D))
+        MG_training = np.zeros((M, N_used+1, D))
         for dd in range(D):
-            # Ensure both operands have the same dimension
-            MG_training[:,1:N_common+1,dd] = np.cumsum(
-                S_training_sig[:,0:N_common,dd] * dW_training[:,0:N_common],
+            # Match dimensions using min() to prevent errors
+            n_steps = min(N_used, dW_training.shape[1])
+            MG_training[:,1:n_steps+1,dd] = np.cumsum(
+                S_training_sig[:,0:n_steps,dd] * dW_training[:,0:n_steps],
                 axis=1
             )
         
         if self.LP_solver == "Gurobi":
             solver = LPSolver(
-                F=Payoff_training[:,:N_common+1], 
+                F=Payoff_training[:,:N_used+1], 
                 tt=np.linspace(0, self.T, self.N1 + 1), 
                 N1=self.N1, 
-                N=N_common, 
+                N=N_used, 
                 D=D, 
                 M=M, 
                 Y=MG_training[:,subindex2,:], 
@@ -255,10 +225,10 @@ class LinearDualPricer:
             res = solver.solve_gurobi()
         elif self.LP_solver == "CVXPY":
             solver = LPSolver(
-                F=Payoff_training[:,:N_common+1], 
+                F=Payoff_training[:,:N_used+1], 
                 tt=np.linspace(0, self.T, self.N1 + 1), 
                 N1=self.N1, 
-                N=N_common, 
+                N=N_used, 
                 D=D, 
                 M=M, 
                 Y=MG_training[:,subindex2,:], 
@@ -269,31 +239,29 @@ class LinearDualPricer:
             raise ValueError(f"Invalid LP solver: {self.LP_solver}")
         
         # Testing for fresh samples
-        MG_testing = np.zeros((M2, N_common_test+1, D))
+        MG_testing = np.zeros((M2, N_used+1, D))
         for dd in range(D):
-            # Ensure both operands have the same dimension
-            MG_testing[:,1:N_common_test+1,dd] = np.cumsum(
-                S_testing_sig[:,0:N_common_test,dd] * dW_testing[:,0:N_common_test],
+            # Match dimensions using min() to prevent errors
+            n_steps = min(N_used, dW_testing.shape[1])
+            MG_testing[:,1:n_steps+1,dd] = np.cumsum(
+                S_testing_sig[:,0:n_steps,dd] * dW_testing[:,0:n_steps],
                 axis=1
             )
-
-        # Ensure we're using valid indices for the testing data
-        test_subindex = [idx for idx in subindex if idx <= N_common_test]
         
         # Compute the upper bound and standard deviation
         upper_bound = np.mean(
             np.max(
-                Payoff_testing[:,test_subindex] - np.dot(MG_testing, res)[:,test_subindex],
+                Payoff_testing[:,subindex] - np.dot(MG_testing, res)[:,subindex],
                 axis=1
             )
         )
         
         upper_bound_std = np.std(
             np.max(
-                Payoff_testing[:,test_subindex] - np.dot(MG_testing, res)[:,test_subindex],
+                Payoff_testing[:,subindex] - np.dot(MG_testing, res)[:,subindex],
                 axis=1
             )
-        ) / np.sqrt(M2)  # Divide by sqrt(M2) to get standard error
+        ) / np.sqrt(M2)
 
         return upper_bound, upper_bound_std, MG_testing
 
@@ -328,7 +296,11 @@ class LPSolver:
         self.D = D
         self.M = M
         self.Y = Y
-        self.subindex = subindex
+        
+        # Make sure indices don't exceed F's dimensions
+        max_idx = F.shape[1] - 1
+        self.subindex = [min(idx, max_idx) for idx in subindex]
+        
         self.L = int(len(Y[0, 0, :]))  # Number of basis functions martingales
         
         # Precompute common matrices
@@ -337,12 +309,11 @@ class LPSolver:
         self.B = np.zeros(M * (N1 + 1))
         self.A = np.zeros(shape=(M * (N1 + 1), self.L + M))
         for l in range(M):
-            self.B[l*(N1+1):(l+1)*(N1+1)] = F[l, subindex]
+            self.B[l*(N1+1):(l+1)*(N1+1)] = F[l, self.subindex]
             self.A[l*(N1+1):(l+1)*(N1+1), l] = 1
             self.A[l*(N1+1):(l+1)*(N1+1), M:M+self.L] = Y[l, :, :]
 
     def solve_cvxpy(self):
-
         """Solve the LP using CVXPY"""
         start_time = time.time()
         

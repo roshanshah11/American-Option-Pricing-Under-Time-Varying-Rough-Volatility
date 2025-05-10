@@ -16,7 +16,6 @@ from functools import reduce
 from tensorflow.python.autograph.impl.conversion import _is_known_loaded_type as _orig_is_known_loaded_type
 import tensorflow.python.autograph.impl.conversion as _conv
 
-# Disable AutoGraph to avoid conversion TypeError issues
 tf.config.run_functions_eagerly(True)
 
 def _safe_is_known_loaded_type(f, module_name, entity_name):
