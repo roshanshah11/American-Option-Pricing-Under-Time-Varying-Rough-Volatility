@@ -144,16 +144,136 @@ def forecast_xgb_only(hurst_series: pd.Series, xgb_only, periods: int, k: int):
     dates = pd.date_range(hurst_series.index[-1] + pd.Timedelta(days=1), periods=periods, freq='B')
     return pd.DataFrame({'ds': dates, 'yhat': np.array(preds)})
 
+def train_multi_step_xgb(hurst_series: pd.Series, train_frac: float, k: int, horizon: int, xgb_params: dict):
+    """Train multiple XGBoost models to predict all steps in the forecast horizon at once."""
+    split = int(len(hurst_series) * train_frac)
+    train = hurst_series.iloc[:split]
+    values = train.values
+    
+    # Create separate models for each step in the forecast horizon
+    models = []
+    
+    for step in range(horizon):
+        X, y = [], []
+        # For each forecast step, create appropriate training examples
+        for i in range(k, len(values) - step):
+            X.append(values[i-k:i])
+            y.append(values[i+step])  # Target is 'step' days ahead
+            
+        X = np.array(X)
+        y = np.array(y)
+        
+        # Train model for this specific forecast step
+        model = XGBRegressor(**xgb_params)
+        model.fit(X, y)
+        models.append(model)
+        logger.info(f"Trained model for step {step+1}/{horizon}")
+    
+    # Save the models
+    joblib.dump(models, MODELS_DIR / f'xgb_multi_step_{horizon}.pkl')
+    logger.info(f"Multi-step XGBoost models saved to {MODELS_DIR}")
+    
+    return models
+
+def forecast_multi_step_xgb(hurst_series: pd.Series, models: list, periods: int, k: int):
+    """Generate all future forecasts at once using the multi-step models."""
+    # Get the most recent window of data
+    last_window = hurst_series.values[-k:]
+    
+    # Generate predictions for each step using its own model
+    predictions = []
+    for step in range(min(periods, len(models))):
+        model = models[step]
+        pred = model.predict(last_window.reshape(1, -1))[0]
+        predictions.append(pred)
+    
+    # If we need more predictions than we have models for
+    while len(predictions) < periods:
+        predictions.append(predictions[-1])  # Just repeat the last prediction
+    
+    dates = pd.date_range(hurst_series.index[-1] + pd.Timedelta(days=1), 
+                         periods=periods, freq='B')
+    
+    return pd.DataFrame({'ds': dates, 'yhat': np.array(predictions)})
+
+def evaluate_multi_step_xgb(hurst_series: pd.Series, models: list, k: int, test_frac: float, horizon: int):
+    """Evaluate multi-step XGBoost models on test split and plot results."""
+    split = int(len(hurst_series) * (1 - test_frac))
+    test = hurst_series.iloc[split:]
+    
+    # Calculate the actual values for each forecast step
+    actuals = []
+    for step in range(horizon):
+        if step < len(test) - k:
+            actual_vals = test.iloc[k+step:].values
+            actuals.append(actual_vals)
+        else:
+            actuals.append([])
+    
+    # Calculate predictions for each step
+    predictions = []
+    for step, model in enumerate(models):
+        if step < horizon:
+            X_test = []
+            for i in range(k, len(test) - step):
+                X_test.append(test.iloc[i-k:i].values)
+            
+            if X_test:
+                X_test = np.array(X_test)
+                preds = model.predict(X_test)
+                predictions.append(preds)
+            else:
+                predictions.append([])
+    
+    # Calculate error metrics for each step
+    mse_values = []
+    mae_values = []
+    for step in range(horizon):
+        if len(actuals[step]) > 0 and len(predictions[step]) > 0:
+            min_len = min(len(actuals[step]), len(predictions[step]))
+            mse = mean_squared_error(actuals[step][:min_len], predictions[step][:min_len])
+            mae = mean_absolute_error(actuals[step][:min_len], predictions[step][:min_len])
+            mse_values.append(mse)
+            mae_values.append(mae)
+            logger.info(f"Step {step+1} - MSE: {mse:.4f}, MAE: {mae:.4f}")
+    
+    # Plot results for multiple steps
+    plt.figure(figsize=(14, 7))
+    dates_test = test.index[k:]
+    plt.plot(dates_test, test.iloc[k:].values, 'k-', label='Actual Hurst')
+    
+    colors = ['b', 'g', 'r', 'c', 'm', 'y']
+    for step in range(min(5, horizon)):  # Plot up to 5 steps for clarity
+        if len(predictions[step]) > 0:
+            forecast_dates = dates_test[:len(predictions[step])]
+            plt.plot(forecast_dates, predictions[step], 
+                    f'{colors[step % len(colors)]}--', 
+                    label=f'Step {step+1} Forecast')
+    
+    plt.title('Multi-Step XGBoost: Actual vs Forecast Hurst Exponent')
+    plt.xlabel('Date')
+    plt.ylabel('Hurst Exponent')
+    plt.legend()
+    plt.grid(True)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+    
+    return np.mean(mse_values), np.mean(mae_values)
+
 def interactive_menu():
     # here is a source i used: https://docs.python.org/3/library/functions.html#input
     print("Select action:")
     print("0: Train XGBoost model (interactive)")
     print("1: Evaluate XGBoost model (interactive)")
     print("2: Forecast XGBoost model (interactive)")
+    print("3: Train Multi-Step XGBoost model (interactive)")
     print("4: Quick train XGBoost with defaults")
     print("5: Quick evaluate XGBoost with defaults")
     print("6: Quick forecast XGBoost with defaults")
-    choice = input("Enter choice (0,1,2,4,5,6): ")
+    print("7: Evaluate Multi-Step XGBoost model")
+    print("8: Forecast with Multi-Step XGBoost model")
+    choice = input("Enter choice (0,1,2,3,4,5,6,7,8): ")
     return choice
 
 def main():
@@ -164,12 +284,12 @@ def main():
     # here is a source i used: https://docs.python.org/3/library/logging.html
     logger.info("Starting main execution...")
     mode = interactive_menu().strip()
-    if mode not in ['0','1','2','4','5','6']:
+    if mode not in ['0','1','2','3','4','5','6','7','8']:
         logger.error("Invalid mode selected. Exiting.")
         return
 
     # Interactive input vs. quick defaults
-    if mode in ['0','1','2']:
+    if mode in ['0','1','2','3','7','8']:
         power     = int(input("Enter power for rolling Hurst (default 6): ") or 6)
         ticker    = input("Enter ticker (default AAPL): ") or 'AAPL'
         train_frac= float(input("Enter train fraction (default 0.8): ") or 0.8)
@@ -215,6 +335,34 @@ def main():
         plt.xlabel('Date'); plt.ylabel('Hurst Exponent')
         plt.legend(); plt.grid(True)
         plt.xticks(rotation=45); plt.tight_layout(); plt.show()
+    elif mode == '3':
+        # Train multi-step model
+        multi_models = train_multi_step_xgb(hurst_series, train_frac, k, periods, xgb_params)
+        logger.info(f"Trained {len(multi_models)} models for multi-step forecasting")
+    elif mode == '7':
+        # Evaluate multi-step model
+        try:
+            multi_models = joblib.load(MODELS_DIR / f'xgb_multi_step_{periods}.pkl')
+            mse, mae = evaluate_multi_step_xgb(hurst_series, multi_models, k, test_frac, periods)
+            logger.info(f"Multi-step XGBoost results - Average MSE: {mse:.4f}, Average MAE: {mae:.4f}")
+        except FileNotFoundError:
+            logger.error(f"Multi-step model file not found. Please train the model first.")
+    elif mode == '8':
+        # Forecast with multi-step model
+        try:
+            multi_models = joblib.load(MODELS_DIR / f'xgb_multi_step_{periods}.pkl')
+            df_fc = forecast_multi_step_xgb(hurst_series, multi_models, periods, k)
+            logger.info("Multi-step XGBoost forecast:\n%s", df_fc)
+            
+            plt.figure(figsize=(12,6))
+            plt.plot(hurst_series.index, hurst_series.values, 'k-', label='Historical Hurst')
+            plt.plot(df_fc['ds'], df_fc['yhat'], 'r--', label='Multi-step Forecast')
+            plt.title(f'{periods}-Day Multi-step Hurst Forecast for {ticker}')
+            plt.xlabel('Date'); plt.ylabel('Hurst Exponent')
+            plt.legend(); plt.grid(True)
+            plt.xticks(rotation=45); plt.tight_layout(); plt.show()
+        except FileNotFoundError:
+            logger.error(f"Multi-step model file not found. Please train the model first.")
 
 if __name__ == '__main__':
     main()

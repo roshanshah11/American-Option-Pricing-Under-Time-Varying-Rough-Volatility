@@ -1,6 +1,4 @@
 import numpy as np
-from FBM_package import FBM
-import scipy as sc
 from utils import *
 
 class DynamicHurstrBergomi(object):
@@ -220,3 +218,197 @@ def SimulationWithDynamicHurst(M, N, T_years, phi, rho, K, X0, H_series, xi, eta
     
     return X, V, I, dI, dW1, dW2, dB, Y
 
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Implementation of a Dynamic Hurst-Heston stochastic volatility model
+that supports a time‐varying Hurst exponent H(t) in the diffusion term.
+Designed to plug into your signature‐based American option pricer
+(similar interface to DynamicHurstrBergomi).
+"""
+
+class DynamicHurstHeston:
+    """
+    Dynamic Hurst‐Heston model:
+        dv_t = κ (θ − v_t) dt + ξ * v_t^{H(t)} dW^v_t
+        dS_t = μ S_t dt    + sqrt(v_t)    S_t dW^S_t
+    where H(t) > 0.5 is provided as a time series.
+    """
+
+    def __init__(self,
+                 n: int = 100,
+                 N: int = 1000,
+                 T: float = 1.0,
+                 H_series: np.ndarray = None):
+        """
+        Args:
+            n         -- steps per year
+            N         -- number of Monte-Carlo paths
+            T         -- maturity (years)
+            H_series  -- length (n*T+1) array of Hurst exponents, each > 0.5
+        """
+        self.T = T
+        self.n = n
+        self.dt = 1.0 / n
+        self.s = int(n * T)
+        self.t = np.linspace(0, T, self.s + 1)
+        self.N = N
+
+        # build H_series, interpolate if needed
+        if H_series is None:
+            self.H = np.full(self.s + 1, 0.7)
+        else:
+            x = np.linspace(0, T, len(H_series))
+            y = np.array(H_series)
+            self.H = np.interp(self.t, x, y)
+        # ensure H>0.5
+        self.H = np.maximum(self.H, 0.5001)
+
+    def dW1(self) -> np.ndarray:
+        """
+        Volatility Brownian increments for v_t
+        (could be fractional—but here we use standard BM)
+        Returns shape (N, s)
+        """
+        return np.random.randn(self.N, self.s) * np.sqrt(self.dt)
+
+    def dW2(self) -> np.ndarray:
+        """
+        Orthogonal increments for S_t
+        Returns shape (N, s)
+        """
+        return np.random.randn(self.N, self.s) * np.sqrt(self.dt)
+
+    def dB(self,
+           dW1: np.ndarray,
+           dW2: np.ndarray,
+           rho: float = 0.0) -> np.ndarray:
+        """
+        Correlated price increments: dB = rho dW1 + sqrt(1−rho²) dW2
+        """
+        return rho * dW1 + np.sqrt(1 - rho ** 2) * dW2
+
+    def V(self,
+          dW1: np.ndarray,
+          kappa: float = 1.0,
+          theta: float = 0.04,
+          xi: float = 0.5,
+          v0: float = None) -> np.ndarray:
+        """
+        Simulate variance paths under Dynamic Hurst‐Heston.
+        Returns V array of shape (N, s+1).
+        """
+        if v0 is None:
+            v0 = theta
+        V = np.zeros((self.N, self.s + 1))
+        V[:, 0] = v0
+
+        for t in range(self.s):
+            H_t = self.H[t]
+            drift = kappa * (theta - V[:, t]) * self.dt
+            diffusion = xi * (V[:, t] ** H_t) * dW1[:, t]
+            V[:, t + 1] = np.maximum(0.0, V[:, t] + drift + diffusion)
+        return V
+
+    def S(self,
+          V: np.ndarray,
+          dB: np.ndarray,
+          mu: float = 0.0,
+          S0: float = 1.0) -> np.ndarray:
+        """
+        Simulate asset price paths under Dynamic Hurst‐Heston.
+        Returns S array of shape (N, s+1).
+        """
+        S = np.zeros_like(V)
+        S[:, 0] = S0
+
+        # Euler–Maruyama on log scale
+        for t in range(self.s):
+            S[:, t + 1] = S[:, t] * np.exp(
+                (mu - 0.5 * V[:, t]) * self.dt
+                + np.sqrt(V[:, t]) * dB[:, t]
+            )
+        return S
+
+def SimulationWithDynamicHurstHeston(M, N, T_years, phi, rho, K, X0, H_series, xi, eta, r, days_per_year=252):
+    """
+    Simulate paths under Dynamic Hurst-Heston model with an interface matching SimulationWithDynamicHurst.
+    
+    Parameters:
+    -----------
+    M : int
+        Number of samples in simulation
+    N : int
+        Number of discretization points for the grid [0,T]
+    T_years : float
+        Maturity in years
+    phi : function
+        Payoff function (unused in Heston, included for interface compatibility)
+    rho : float
+        Correlation coefficient
+    K : int
+        Depth of Signature (unused in Heston, included for interface compatibility)
+    X0 : float
+        Initial value of price
+    H_series : array-like
+        Time series of Hurst parameters for each time step
+    xi : float
+        Vol-of-vol parameter in the Heston model
+    eta : float
+        Unused in Heston but kept for interface compatibility
+    r : float
+        Risk-free interest rate
+    days_per_year : int
+        Number of days in a year (default = 252, unused in Heston but kept for compatibility)
+    
+    Returns:
+    --------
+    Tuple containing:
+        X   -- price paths (M, s+1)
+        V   -- variance paths (M, s+1)
+        I   -- integrated variance (M, s+1)
+        dI  -- variance increments (M, s, 1)
+        dW1 -- volatility BM increments (M, s, 1)
+        dW2 -- orthogonal BM increments (M, s, 1)
+        dB  -- correlated price increments (M, s, 1)
+        Y   -- Yamada process (placeholder, unused in Heston)
+    """
+    # The Heston-specific parameters with default values
+    kappa = 2.0  # Mean reversion speed
+    theta = 0.04  # Long-term variance
+    mu = r  # Risk-free rate (used in price process)
+    
+    # Create the dynamic Hurst-Heston model
+    model = DynamicHurstHeston(n=N, N=M, T=T_years, H_series=H_series)
+    
+    # Two independent Brownian motion increments
+    dW1 = model.dW1()
+    dW2 = model.dW2()
+    
+    # Variance process V, using Heston model's implementation
+    V = model.V(dW1, kappa, theta, xi)
+    
+    # Price process with correlated increments
+    dB = model.dB(dW1, dW2, rho)
+    X = model.S(V, dB, mu + r, X0)
+    
+    # Get the steps for consistent indexing
+    steps = model.s + 1
+    time_steps = model.s
+    
+    # Calculate integrated variance (I) and its increments (dI)
+    I = np.zeros((M, steps))
+    for t in range(time_steps):
+        I[:, t+1] = I[:, t] + np.sqrt(V[:, t]) * dW1[:, t]
+    
+    dI = (I[:, 1:steps] - I[:, 0:time_steps]).reshape(M, time_steps, 1)
+    
+    # Reshape increments for signature compatibility
+    dW1_reshaped = dW1.reshape(M, time_steps, 1)
+    dW2_reshaped = dW2.reshape(M, time_steps, 1)
+    dB_reshaped = dB.reshape(M, time_steps, 1)
+    
+    # For interface compatibility with rBergomi, create a placeholder Y process
+    Y = np.zeros_like(V)
+    
+    return X, V, I, dI, dW1_reshaped, dW2_reshaped, dB_reshaped, Y

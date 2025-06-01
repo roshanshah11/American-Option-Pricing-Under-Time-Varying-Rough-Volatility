@@ -6,7 +6,6 @@ Created on Fri Mar 15 15:09:30 2024
 @author: lucapelizzari
 """
 
-import sys
 import numpy as np
 from scipy.stats import norm
 from scipy.optimize import brentq
