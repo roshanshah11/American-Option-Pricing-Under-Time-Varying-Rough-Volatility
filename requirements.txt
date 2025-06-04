@@ -71,9 +71,11 @@ protobuf==4.25.7
 psutil==7.0.0
 ptyprocess==0.7.0
 pure_eval==0.2.3
+pyarrow==20.0.0
 pyasn1==0.6.1
 pyasn1_modules==0.4.2
 Pygments==2.19.1
+pylance==0.28.0
 pyparsing==3.2.3
 python-dateutil==2.9.0.post0
 pytz==2025.2
