@@ -164,7 +164,7 @@ using deep-signatures and signature-kernels"
 ## Contact
 - Author: Roshan Shah
 - GitHub: @roshanshah11
-- Email: roshah529@gmail.com
+- Email: rashah529@gmail.com
 
 ## License
 MIT License
