@@ -128,34 +128,6 @@ This repository is primarily notebook-based. Here's a recommended sequence:
 2. **XGboost_Hurst_Tutorial.ipynb**: Learn how to forecast the Hurst parameter
 3. **final.ipynb**: See the complete pricing pipeline in action
 
-## Example Usage
-Import the pipeline and run pricing:
-
-```python
-# Example for importing and running the pricing pipeline
-from Linear_signature_optimal_stopping import LinearSignatureStopping
-from rBergomi_simulation import simulate_paths
-
-# Generate paths
-paths = simulate_paths(n_paths=1000, hurst=0.1)
-
-# Initialize and run pricing
-pricer = LinearSignatureStopping(paths)
-result = pricer.compute_price_bounds()
-
-print(f"Price bounds: [{result.lower_bound}, {result.upper_bound}]")
-```
-
-## Results
-- Reduces duality gaps by up to 50% compared to deep signature baselines
-- Runs 2–3x faster using RFF-based approximation
-
-## Project Architecture
-![Architecture Diagram](docs/architecture.png)
-*Figure: Component interaction in the signature-based hybrid framework*
-
-*Note: If this image doesn't exist yet in your repository, please create a simple diagram showing the workflow from forecasting to pricing.*
-
 ## Dependencies
 - **Core**: numpy, pandas, scipy, scikit-learn
 - **Machine Learning**: xgboost, tensorflow (2.14), torch
